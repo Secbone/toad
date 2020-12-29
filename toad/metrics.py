@@ -5,7 +5,6 @@ from scipy.stats import ks_2samp
 from sklearn.metrics import f1_score, roc_auc_score, roc_curve
 
 from .merge import merge
-from .transform import Combiner
 
 from .utils import (
     feature_splits,
@@ -264,6 +263,7 @@ def PSI(test, base, combiner = None, return_frame = False):
 
     if combiner is not None:
         if isinstance(combiner, (dict, list)):
+            from .transform import Combiner
             combiner = Combiner().load(combiner)
 
         test = combiner.transform(test, labels = True)

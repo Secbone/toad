@@ -5,6 +5,7 @@ import pandas as pd
 
 from scipy import stats
 from .merge import merge
+from .metrics import KS, AUC, F1, PSI
 
 from .utils import (
     np_count,
@@ -264,18 +265,57 @@ def VIF(frame):
     return pd.Series(vif, index = index)
 
 
-def column_quality(feature, target, name = 'feature', iv_only = False, **kwargs):
+INDICATORS = {
+    'iv': {
+        'func': IV,
+        'need_merge': True,
+    },
+    'gini': gini_cond,
+    'entropy': entropy_cond,
+    'auc': {
+        'func': AUC,
+        'dtype': np.number,
+    },
+    'ks': {
+        'func': KS,
+        'dtype': np.number,
+    },
+    'unique': lambda x, t: len(np_unique(x)),
+}
+
+
+def column_quality(feature, target, name = 'feature', indicators = ['iv', 'gini', 'entropy', 'unique'], iv_only = False, **kwargs):
     """calculate quality of a feature
 
     Args:
         feature (array-like)
         target (array-like)
         name (str): feature's name that will be setted in the returned Series
-        iv_only (bool): if only calculate IV
+        iv_only (bool): `deprecated`. if only calculate IV
 
     Returns:
         Series: a list of quality with the feature's name
     """
+    if iv_only:
+        import warnings
+        warnings.warn(
+            """`iv_only` will be deprecated soon,
+                please use `indicators = ['iv']` instead!
+            """,
+            DeprecationWarning,
+        )
+
+        dummy_func = lambda x, t: STATS_EMPTY
+        indicators = {
+            'iv': INDICATORS['iv'],
+            'gini': dummy_func,
+            'entropy': dummy_func,
+            'unique': INDICATORS['unique'],
+        }
+    
+    if isinstance(indicators, (list, tuple)):
+        indicators = {k: INDICATORS[k] for k in indicators}
+
     feature = to_ndarray(feature)
     target = to_ndarray(target)
 
@@ -283,18 +323,29 @@ def column_quality(feature, target, name = 'feature', iv_only = False, **kwargs)
         feature = feature.astype(str)
 
     c = len(np_unique(feature))
-    iv = g = e = STATS_EMPTY
 
-    # skip when unique is too much
-    if is_continuous(feature) or c / len(feature) < 0.5:
-        iv = IV(feature, target, **kwargs)
-        if not iv_only:
-            g = gini_cond(feature, target)
-            e = entropy_cond(feature, target)
+    res = []  
+    for n, func in indicators.items():
+        if isinstance(func, dict):
+            func = func.copy()
+            # filter by dtype
+            if 'dtype' in func and not isinstance(feature.dtype, func['dtype']):
+                res.append(STATS_EMPTY)
+                continue
+
+            if 'need_merge' in func:
+                # wrap function for using merge arguments
+                f = func['func']
+                func['func'] = lambda x, t: f(x, t, **kwargs)
+
+            # reset function
+            func = func['func']
+        
+        res.append(func(feature, target))
 
     row = pd.Series(
-        index = ['iv', 'gini', 'entropy', 'unique'],
-        data = [iv, g, e, c],
+        index = list(indicators.keys()),
+        data = res,
     )
 
     row.name = name
@@ -307,7 +358,7 @@ def quality(dataframe, target = 'target', cpu_cores = 0, **kwargs):
     Args:
         dataframe (DataFrame): dataframe that will be calculate quality
         target (str): the target's name in dataframe
-        iv_only (bool): if only calculate IV
+        iv_only (bool): `deprecated`. if only calculate IV
         cpu_cores (int): the maximun number of CPU cores will be used, `0` means all CPUs will be used, 
             `-1` means all CPUs but one will be used.
 
