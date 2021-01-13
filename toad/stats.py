@@ -17,7 +17,7 @@ from .utils import (
     split_target,
 )
 
-from .utils.decorator import support_dataframe
+from .utils.decorator import Decorator, support_dataframe
 
 STATS_EMPTY = np.nan
 
@@ -265,94 +265,72 @@ def VIF(frame):
     return pd.Series(vif, index = index)
 
 
+
+class indicator(Decorator):
+    """indicator decorator
+    """
+    # indicator name
+    name = 'indicator'
+    need_merge = False
+    dtype = None
+
+    def wrapper(self, *args, **kwargs):
+        return self.call(*args, **kwargs)
+
+# default indicators
 INDICATORS = {
-    'iv': {
-        'func': IV,
-        'need_merge': True,
-    },
-    'gini': gini_cond,
-    'entropy': entropy_cond,
-    'auc': {
-        'func': AUC,
-        'dtype': np.number,
-    },
-    'ks': {
-        'func': KS,
-        'dtype': np.number,
-    },
-    'unique': lambda x, t: len(np_unique(x)),
+    'iv': indicator(name = 'iv', need_merge = True)(IV),
+    'gini': indicator(name = 'gini')(gini_cond),
+    'entropy': indicator(name = 'entropy')(entropy_cond),
+    'auc': indicator(name = 'auc', dtype = np.number)(AUC),
+    'ks': indicator(name = 'ks', dtype = np.number)(KS),
+    'unique': indicator(name = 'unique')(lambda x, *arg: len(np_unique(x))),
 }
 
 
-def column_quality(feature, target, name = 'feature', indicators = ['iv', 'gini', 'entropy', 'unique'], iv_only = False, **kwargs):
+def column_quality(feature, target, name = 'feature', indicators = [], need_merge = False, **kwargs):
     """calculate quality of a feature
 
     Args:
         feature (array-like)
         target (array-like)
         name (str): feature's name that will be setted in the returned Series
-        iv_only (bool): `deprecated`. if only calculate IV
+        indicators (list): list of indicator functions
+        need_merge (bool): if need merge feature
 
     Returns:
         Series: a list of quality with the feature's name
     """
-    if iv_only:
-        import warnings
-        warnings.warn(
-            """`iv_only` will be deprecated soon,
-                please use `indicators = ['iv']` instead!
-            """,
-            DeprecationWarning,
-        )
-
-        dummy_func = lambda x, t: STATS_EMPTY
-        indicators = {
-            'iv': INDICATORS['iv'],
-            'gini': dummy_func,
-            'entropy': dummy_func,
-            'unique': INDICATORS['unique'],
-        }
-    
-    if isinstance(indicators, (list, tuple)):
-        indicators = {k: INDICATORS[k] for k in indicators}
-
     feature = to_ndarray(feature)
     target = to_ndarray(target)
 
     if not np.issubdtype(feature.dtype, np.number):
         feature = feature.astype(str)
 
-    c = len(np_unique(feature))
+    if need_merge:
+        bin_feature = merge(feature, target, **kwargs)
 
-    res = []  
-    for n, func in indicators.items():
-        if isinstance(func, dict):
-            func = func.copy()
-            # filter by dtype
-            if 'dtype' in func and not isinstance(feature.dtype, func['dtype']):
-                res.append(STATS_EMPTY)
-                continue
+    res = {}  
+    for func in indicators:
+        # filter by dtype
+        if func.dtype is not None and not isinstance(feature.dtype, func.dtype):
+            res[func.name] = STATS_EMPTY
+            continue
 
-            if 'need_merge' in func:
-                # wrap function for using merge arguments
-                f = func['func']
-                func['func'] = lambda x, t: f(x, t, **kwargs)
-
-            # reset function
-            func = func['func']
+        # if function need use bin feature
+        if func.need_merge:
+            res[func.name] = func(bin_feature, target)
+            continue
         
-        res.append(func(feature, target))
+        res[func.name] = func(feature, target)
 
-    row = pd.Series(
-        index = list(indicators.keys()),
-        data = res,
-    )
+    row = pd.Series(res)
 
     row.name = name
     return row
 
 
-def quality(dataframe, target = 'target', cpu_cores = 0, **kwargs):
+def quality(dataframe, target = 'target', cpu_cores = 0, iv_only = False, indicators = ['iv', 'gini', 'entropy', 'unique'], **kwargs):
     """get quality of features in data
 
     Args:
@@ -366,6 +344,37 @@ def quality(dataframe, target = 'target', cpu_cores = 0, **kwargs):
         DataFrame: quality of features with the features' name as row name
     """
     frame, target = split_target(dataframe, target)
+
+    if iv_only:
+        import warnings
+        warnings.warn(
+            """`iv_only` will be deprecated soon,
+                please use `indicators = ['iv']` instead!
+            """,
+            DeprecationWarning,
+        )
+
+        dummy_func = lambda x, t: STATS_EMPTY
+
+        indicators = [
+            'iv',
+            indicator(name = 'gini')(dummy_func),
+            indicator(name = 'entropy')(dummy_func),
+            'unique',
+        ]
+    
+    
+    need_merge = False
+    for i, f in enumerate(indicators):
+        # replace str type indicator to function
+        if isinstance(f, str):
+            assert f in INDICATORS
+
+            indicators[i] = INDICATORS[f]
+        
+        # update need merge flag
+        need_merge |= indicators[i].need_merge
+    
     
     if cpu_cores < 1:
         cpu_cores = cpu_cores - 1
@@ -375,12 +384,19 @@ def quality(dataframe, target = 'target', cpu_cores = 0, **kwargs):
 
     jobs = []
     for name, series in frame.iteritems():
-        jobs.append(delayed(column_quality)(series, target, name = name, **kwargs))
+        jobs.append(delayed(column_quality)(
+            series,
+            target,
+            name = name,
+            indicators = indicators,
+            need_merge = need_merge,
+            **kwargs
+        ))
 
     rows = pool(jobs)
 
 
     return pd.DataFrame(rows).sort_values(
-        by = 'iv',
+        by = indicators[0].name,
         ascending = False,
     )
